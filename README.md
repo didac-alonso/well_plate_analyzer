@@ -68,6 +68,8 @@ You have to do this for all the corners. Then the program will automatically rot
 ## 5. Select the first 3 wells centres: Top left, the one next to it and the one under it.
 This is used to interpolate the position of the rest of all well centres, be precise.
 
+![alt text](image-3.png)
+
 ## 6. Insert in the terminal how many horizontal and vertical wells do you have in your matrix.
 
 ![alt text](image-2.png)
