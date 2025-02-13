@@ -213,57 +213,117 @@ def get_neighbors(coord, shape):
     return neighbors
 
 
-def adaptive_watershed(image, seed, initial_threshold=220, final_threshold=150, threshold_step=10, 
+# def adaptive_watershed(image, seed, initial_threshold=220, final_threshold=150, threshold_step=10, 
+#                        max_iterations=100, max_radius_diff=5, min_growth_per_iter=5):
+#     """
+#     Improved region-growing function that mimics a watershed algorithm.
+#     - Starts growing under a strict threshold
+#     - Expands until it slows down significantly
+#     - Dynamically relaxes the threshold as needed
+#     - Stops if radius change is too large (prevents leaking into other wells)
+    
+#     Args:
+#         image: Grayscale (inverted) image.
+#         seed: A tuple (x, y) for the initial well center.
+#         initial_threshold: Starting pixel intensity for inclusion.
+#         final_threshold: Lowest pixel intensity allowed for expansion.
+#         threshold_step: Amount by which the threshold is relaxed.
+#         max_iterations: Max iterations to prevent infinite growth.
+#         max_radius_diff: Max allowed change in radius per iteration.
+#         min_growth_per_iter: Minimum number of pixels added per iteration.
+    
+#     Returns:
+#         region: Set of pixels in the well.
+#         iterations: How many iterations were performed.
+#         area: Total number of pixels in the well.
+#     """
+#     region = set([seed])
+#     border = set([seed])
+#     iterations = 0
+#     threshold = initial_threshold
+#     prev_radius = 1  # Start with a tiny circle assumption
+
+#     while iterations < max_iterations and threshold >= final_threshold:
+#         new_border = set()
+
+#         for pixel in border:
+#             for neighbor in get_neighbors(pixel, image.shape):
+#                 if neighbor not in region:
+#                     if image[neighbor[1], neighbor[0]] >= threshold:
+#                         new_border.add(neighbor)
+
+#         if len(new_border) < min_growth_per_iter:  # Growth has slowed too much
+#             threshold -= threshold_step  # Relax threshold
+#             continue  # Retry with relaxed threshold
+
+#         new_region = region.union(new_border)
+#         new_area = len(new_region)
+#         new_radius = math.sqrt(new_area / math.pi)  # Estimate circular radius
+
+#         # If the radius change is too large, assume it leaked into another well
+#         if abs(new_radius - prev_radius) > max_radius_diff:
+#             print(f"Stopping: Radius grew too fast at iteration {iterations} ({prev_radius:.2f} → {new_radius:.2f})")
+#             return set(), iterations, 0  # Invalid region
+
+#         prev_radius = new_radius
+#         region = new_region
+#         border = new_border
+#         iterations += 1
+
+#     area = len(region)
+#     return region, iterations, area
+
+
+def adaptive_watershed(image, seed, final_threshold=175, threshold_step=10, 
                        max_iterations=100, max_radius_diff=5, min_growth_per_iter=5):
     """
-    Improved region-growing function that mimics a watershed algorithm.
-    - Starts growing under a strict threshold
-    - Expands until it slows down significantly
-    - Dynamically relaxes the threshold as needed
-    - Stops if radius change is too large (prevents leaking into other wells)
-    
+    Adaptive region-growing function for INVERTED images:
+    - Starts at the darkest point (seed intensity).
+    - Expands outward until reaching a threshold of ~175.
+    - Stops if growth slows down or leaks into other wells.
+
     Args:
         image: Grayscale (inverted) image.
         seed: A tuple (x, y) for the initial well center.
-        initial_threshold: Starting pixel intensity for inclusion.
-        final_threshold: Lowest pixel intensity allowed for expansion.
-        threshold_step: Amount by which the threshold is relaxed.
+        final_threshold: The max allowed threshold for expansion.
+        threshold_step: How much to relax the threshold per iteration.
         max_iterations: Max iterations to prevent infinite growth.
         max_radius_diff: Max allowed change in radius per iteration.
         min_growth_per_iter: Minimum number of pixels added per iteration.
-    
+
     Returns:
         region: Set of pixels in the well.
-        iterations: How many iterations were performed.
+        iterations: Number of iterations performed.
         area: Total number of pixels in the well.
     """
+    seed_intensity = image[seed[1], seed[0]]  # Get seed pixel intensity
+    threshold = seed_intensity  # Start at the darkest pixel
     region = set([seed])
     border = set([seed])
     iterations = 0
-    threshold = initial_threshold
-    prev_radius = 1  # Start with a tiny circle assumption
+    prev_radius = 1  # Initial small circle assumption
 
-    while iterations < max_iterations and threshold >= final_threshold:
+    while iterations < max_iterations and threshold <= final_threshold:
         new_border = set()
 
         for pixel in border:
             for neighbor in get_neighbors(pixel, image.shape):
                 if neighbor not in region:
-                    if image[neighbor[1], neighbor[0]] >= threshold:
+                    if image[neighbor[1], neighbor[0]] <= threshold:  # Grow into brighter areas
                         new_border.add(neighbor)
 
-        if len(new_border) < min_growth_per_iter:  # Growth has slowed too much
-            threshold -= threshold_step  # Relax threshold
-            continue  # Retry with relaxed threshold
+        if len(new_border) < min_growth_per_iter:  # If growth slows, increase threshold
+            threshold += threshold_step
+            continue  
 
         new_region = region.union(new_border)
         new_area = len(new_region)
-        new_radius = math.sqrt(new_area / math.pi)  # Estimate circular radius
+        new_radius = math.sqrt(new_area / math.pi)  
 
         # If the radius change is too large, assume it leaked into another well
         if abs(new_radius - prev_radius) > max_radius_diff:
             print(f"Stopping: Radius grew too fast at iteration {iterations} ({prev_radius:.2f} → {new_radius:.2f})")
-            return set(), iterations, 0  # Invalid region
+            return set(), iterations, 0  
 
         prev_radius = new_radius
         region = new_region
