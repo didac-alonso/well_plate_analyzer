@@ -74,6 +74,6 @@ This is used to interpolate the position of the rest of all well centres, be pre
 
 ![alt text](readme_images/image-2.png)
 
-## 7. The results are saved in well_size.csv and well_white_intensity.csv, following the same structure as the well matrix.
+## 7. The results are saved in well_size.csv, well_white_intensity.csv, well_classification.csv, and well_size_class_product.csv. Following the same structure as the well matrix.
 
 ![alt text](<readme_images/Screenshot 2025-02-13 at 16.42.56.png>)
