@@ -381,6 +381,79 @@ def region_growing(image, seed, pixel_threshold=200, max_iterations=50, max_radi
     area = len(region)
     return region, iterations, area
 
+def classify_and_filter_wells(well_results):
+    """
+    Classifies well residues based on area and whiteness using dynamic quantiles.
+    Filters out wells that don't meet the criteria (area < 50 or whiteness < 100).
+    Class 1 = highest whiteness (most white), Class 5 = lowest valid whiteness.
+    
+    Args:
+        well_results: List of tuples [(center, iterations, area, circle_diameter, avg_whiteness), ...]
+    
+    Returns:
+        List of tuples [(center, iterations, updated_area, updated_diameter, avg_whiteness, whiteness_class), ...]
+    """
+    # First pass: filter wells and collect valid whiteness values
+    valid_whiteness_values = []
+    
+    for center, iter_count, area, circle_diameter, avg_whiteness in well_results:
+        # Filter wells based on area and whiteness criteria
+        if area >= 50 and avg_whiteness >= 100:
+            valid_whiteness_values.append(avg_whiteness)
+    
+    # If no valid wells, return early with all classified as -1
+    if not valid_whiteness_values:
+        filtered_results = [(center, iter_count, area, circle_diameter, avg_whiteness, -1) 
+                           for center, iter_count, area, circle_diameter, avg_whiteness in well_results]
+        return filtered_results
+    
+    # Calculate dynamic quantile thresholds (5 classes)
+    valid_whiteness_values.sort()
+    num_vals = len(valid_whiteness_values)
+    
+    # Calculate quantile thresholds (20%, 40%, 60%, 80%)
+    thresholds = [
+        valid_whiteness_values[int(num_vals * 0.2)],
+        valid_whiteness_values[int(num_vals * 0.4)],
+        valid_whiteness_values[int(num_vals * 0.6)],
+        valid_whiteness_values[int(num_vals * 0.8)]
+    ]
+    
+    print(f"Dynamic classification thresholds: {thresholds}")
+    
+    # Second pass: classify wells based on dynamic thresholds
+    filtered_results = []
+    
+    for center, iter_count, area, circle_diameter, avg_whiteness in well_results:
+        # Default classification
+        whiteness_class = -1
+        updated_area = area
+        updated_diameter = circle_diameter
+        
+        # Filter wells based on area and whiteness criteria
+        if area < 50 or avg_whiteness < 100:
+            whiteness_class = -1
+            updated_area = 0  # Set area to 0 if filtering out the well
+            updated_diameter = 0  # Also update diameter
+        else:
+            # Dynamic Classification based on quantiles
+            # Class 1 = highest whiteness (reversed from previous version)
+            if avg_whiteness >= thresholds[3]:
+                whiteness_class = 1  # Top 20% (most white)
+            elif avg_whiteness >= thresholds[2]:
+                whiteness_class = 2  # 60-80%
+            elif avg_whiteness >= thresholds[1]:
+                whiteness_class = 3  # 40-60%
+            elif avg_whiteness >= thresholds[0]:
+                whiteness_class = 4  # 20-40%
+            else:
+                whiteness_class = 5  # Bottom 20% (least white but still valid)
+        
+        # Append the updated result
+        filtered_results.append((center, iter_count, updated_area, updated_diameter, avg_whiteness, whiteness_class))
+    
+    return filtered_results
+
 
 def preprocess_image(image):
     """
@@ -607,30 +680,102 @@ if __name__ == "__main__":
     #     print(f"Center {center}: Iterations = {iter_count}, Area = {area}, "
     #           f"Circle Diameter = {circle_diameter:.2f}, Avg Whiteness = {avg_whiteness:.2f}")
     
-    # Build two grids (2D lists) from well_results in row-major order.
-    if len(well_results) != num_wells_h * num_wells_v:
+
+    # Apply classification and filtering to well results
+    classified_results = classify_and_filter_wells(well_results)
+
+    # Build three grids (2D lists) from classified_results in row-major order
+    if len(classified_results) != num_wells_h * num_wells_v:
         print("Warning: The number of well results does not match the grid dimensions!")
-    
+
     white_intensity_grid = []
     size_grid = []
+    class_grid = []  # New grid for classifications
+
     for i in range(num_wells_v):
         row_white = []
         row_size = []
+        row_class = []  # New row for classifications
+        
         for j in range(num_wells_h):
             idx = i * num_wells_h + j
-            row_white.append(well_results[idx][4])  # Average whiteness
-            row_size.append(well_results[idx][3])     # Circle diameter (size)
+            if idx < len(classified_results):
+                row_white.append(classified_results[idx][4])  # Average whiteness
+                row_size.append(classified_results[idx][3])   # Updated circle diameter (size)
+                row_class.append(classified_results[idx][5])  # Whiteness classification
+            else:
+                # Handle case where there are fewer results than expected
+                row_white.append(0)
+                row_size.append(0)
+                row_class.append(-1)
+                
         white_intensity_grid.append(row_white)
         size_grid.append(row_size)
-    
+        class_grid.append(row_class)
+
     # Save the white intensity grid to CSV
     with open("well_white_intensity.csv", "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerows(white_intensity_grid)
     print("Saved 'well_white_intensity.csv'.")
-    
+
     # Save the size grid to CSV
     with open("well_size.csv", "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerows(size_grid)
     print("Saved 'well_size.csv'.")
+
+    # Save the classification grid to CSV
+    with open("well_classification.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerows(class_grid)
+    print("Saved 'well_classification.csv'.")
+
+    # Calculate the size-class product grid from the existing grids
+    product_grid = []
+    for i in range(num_wells_v):
+        row_product = []
+        for j in range(num_wells_h):
+            # If class is -1 (invalid well), product is 0
+            if class_grid[i][j] == -1:
+                product = 0
+            else:
+                product = size_grid[i][j] * class_grid[i][j]
+            row_product.append(product)
+        product_grid.append(row_product)
+
+    # Save the size-class product grid to CSV
+    with open("well_size_class_product.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerows(product_grid)
+    print("Saved 'well_size_class_product.csv'.")
+
+    # Build two grids (2D lists) from well_results in row-major order.
+    # if len(well_results) != num_wells_h * num_wells_v:
+    #     print("Warning: The number of well results does not match the grid dimensions!")
+
+
+    
+    # white_intensity_grid = []
+    # size_grid = []
+    # for i in range(num_wells_v):
+    #     row_white = []
+    #     row_size = []
+    #     for j in range(num_wells_h):
+    #         idx = i * num_wells_h + j
+    #         row_white.append(well_results[idx][4])  # Average whiteness
+    #         row_size.append(well_results[idx][3])     # Circle diameter (size)
+    #     white_intensity_grid.append(row_white)
+    #     size_grid.append(row_size)
+    
+    # # Save the white intensity grid to CSV
+    # with open("well_white_intensity.csv", "w", newline="") as f:
+    #     writer = csv.writer(f)
+    #     writer.writerows(white_intensity_grid)
+    # print("Saved 'well_white_intensity.csv'.")
+    
+    # # Save the size grid to CSV
+    # with open("well_size.csv", "w", newline="") as f:
+    #     writer = csv.writer(f)
+    #     writer.writerows(size_grid)
+    # print("Saved 'well_size.csv'.")
