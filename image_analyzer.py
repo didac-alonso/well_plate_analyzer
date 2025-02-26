@@ -398,7 +398,7 @@ def classify_and_filter_wells(well_results):
     
     for center, iter_count, area, circle_diameter, avg_whiteness in well_results:
         # Filter wells based on area and whiteness criteria
-        if area >= 50 and avg_whiteness >= 100:
+        if circle_diameter >= 20 and avg_whiteness >= 120:
             valid_whiteness_values.append(avg_whiteness)
     
     # If no valid wells, return early with all classified as -1
@@ -431,7 +431,7 @@ def classify_and_filter_wells(well_results):
         updated_diameter = circle_diameter
         
         # Filter wells based on area and whiteness criteria
-        if area < 50 or avg_whiteness < 100:
+        if circle_diameter < 20 or avg_whiteness < 120:
             whiteness_class = -1
             updated_area = 0  # Set area to 0 if filtering out the well
             updated_diameter = 0  # Also update diameter
