@@ -274,64 +274,144 @@ def get_neighbors(coord, shape):
 #     return region, iterations, area
 
 
-def adaptive_watershed(image, seed, final_threshold=175, threshold_step=10, 
-                       max_iterations=100, max_radius_diff=5, min_growth_per_iter=5):
+# def adaptive_watershed(image, seed, final_threshold=85, threshold_step=10, 
+#                        max_iterations=100, max_radius_diff=10, min_growth_per_iter=5):
+#     """
+#     Adaptive region-growing function for INVERTED images:
+#     - Starts at the darkest point (seed intensity).
+#     - Expands outward until reaching a threshold of ~175.
+#     - Stops if growth slows down or leaks into other wells.
+
+#     Args:
+#         image: Grayscale (inverted) image.
+#         seed: A tuple (x, y) for the initial well center.
+#         final_threshold: The max allowed threshold for expansion.
+#         threshold_step: How much to relax the threshold per iteration.
+#         max_iterations: Max iterations to prevent infinite growth.
+#         max_radius_diff: Max allowed change in radius per iteration.
+#         min_growth_per_iter: Minimum number of pixels added per iteration.
+
+#     Returns:
+#         region: Set of pixels in the well.
+#         iterations: Number of iterations performed.
+#         area: Total number of pixels in the well.
+#     """
+#     seed_intensity = image[seed[1], seed[0]]  # Get seed pixel intensity
+#     threshold = seed_intensity  # Start at the darkest pixel
+#     region = set([seed])
+#     border = set([seed])
+#     iterations = 0
+#     prev_radius = 1  # Initial small circle assumption
+
+#     while iterations < max_iterations and threshold <= final_threshold:
+#         new_border = set()
+
+#         for pixel in border:
+#             for neighbor in get_neighbors(pixel, image.shape):
+#                 if neighbor not in region:
+#                     if image[neighbor[1], neighbor[0]] <= threshold:  # Grow into brighter areas
+#                         new_border.add(neighbor)
+
+#         if len(new_border) < min_growth_per_iter:  # If growth slows, increase threshold
+#             threshold += threshold_step
+#             continue  
+
+#         new_region = region.union(new_border)
+#         new_area = len(new_region)
+#         new_radius = math.sqrt(new_area / math.pi)  
+
+#         # If the radius change is too large, assume it leaked into another well
+#         if abs(new_radius - prev_radius) > max_radius_diff:
+#             print(f"Stopping: Radius grew too fast at iteration {iterations} ({prev_radius:.2f} → {new_radius:.2f})")
+#             return set(), iterations, 0  
+
+#         prev_radius = new_radius
+#         region = new_region
+#         border = new_border
+#         iterations += 1
+
+#     area = len(region)
+#     return region, iterations, area
+
+
+import numpy as np
+import math
+
+def adaptive_watershed(image, seed, initial_threshold=150, final_threshold=190, threshold_step=10, 
+                       max_iterations=200, max_radius_diff=5, min_growth_per_iter=5, 
+                       max_intensity_jump=20):
     """
     Adaptive region-growing function for INVERTED images:
     - Starts at the darkest point (seed intensity).
-    - Expands outward until reaching a threshold of ~175.
+    - Expands outward until reaching a threshold.
     - Stops if growth slows down or leaks into other wells.
+    - NEW: Stops if there's a sudden intensity jump relative to the seed intensity.
 
     Args:
         image: Grayscale (inverted) image.
         seed: A tuple (x, y) for the initial well center.
+        initial_threshold: The max initial seed intensity allowed.
         final_threshold: The max allowed threshold for expansion.
         threshold_step: How much to relax the threshold per iteration.
         max_iterations: Max iterations to prevent infinite growth.
         max_radius_diff: Max allowed change in radius per iteration.
         min_growth_per_iter: Minimum number of pixels added per iteration.
+        max_intensity_jump: Maximum allowed jump in intensity relative to the seed.
 
     Returns:
         region: Set of pixels in the well.
         iterations: Number of iterations performed.
         area: Total number of pixels in the well.
     """
+
     seed_intensity = image[seed[1], seed[0]]  # Get seed pixel intensity
     threshold = seed_intensity  # Start at the darkest pixel
+
     region = set([seed])
     border = set([seed])
     iterations = 0
     prev_radius = 1  # Initial small circle assumption
+    
+    if seed_intensity > initial_threshold:
+        return set(), 0, 0  # If the seed is too bright, discard it
 
     while iterations < max_iterations and threshold <= final_threshold:
         new_border = set()
+        new_max_intensity = 0  # Track max intensity in new region
 
         for pixel in border:
             for neighbor in get_neighbors(pixel, image.shape):
                 if neighbor not in region:
-                    if image[neighbor[1], neighbor[0]] <= threshold:  # Grow into brighter areas
+                    pixel_intensity = image[neighbor[1], neighbor[0]]
+                    if pixel_intensity <= threshold:  # Grow into brighter areas
                         new_border.add(neighbor)
+                        new_max_intensity = max(new_max_intensity, pixel_intensity)
 
-        if len(new_border) < min_growth_per_iter:  # If growth slows, increase threshold
+        if len(new_border) < min_growth_per_iter:
             threshold += threshold_step
-            continue  
+            continue
 
+        # Check for sudden intensity jump relative to the seed intensity
+        if new_max_intensity - seed_intensity > max_intensity_jump & new_max_intensity > seed_intensity:
+            print(f"Stopping: Intensity jumped from seed {seed_intensity} → {new_max_intensity} at iteration {iterations}")
+            return region, iterations, len(region)  # Return detected region and area
+
+        # Compute new radius and check for well leakage
         new_region = region.union(new_border)
         new_area = len(new_region)
         new_radius = math.sqrt(new_area / math.pi)  
 
-        # If the radius change is too large, assume it leaked into another well
         if abs(new_radius - prev_radius) > max_radius_diff:
             print(f"Stopping: Radius grew too fast at iteration {iterations} ({prev_radius:.2f} → {new_radius:.2f})")
-            return set(), iterations, 0  
+            return region, iterations, len(region)  # Return detected region and area
 
+        # Update values for next iteration
         prev_radius = new_radius
         region = new_region
         border = new_border
         iterations += 1
 
-    area = len(region)
-    return region, iterations, area
+    return region, iterations, len(region)  # Return final region and area
 
 def region_growing(image, seed, pixel_threshold=200, max_iterations=50, max_radius_diff=5):
     """
