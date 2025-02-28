@@ -334,29 +334,26 @@ def get_neighbors(coord, shape):
 #     return region, iterations, area
 
 
-import numpy as np
-import math
-
-def adaptive_watershed(image, seed, initial_threshold=150, final_threshold=190, threshold_step=10, 
-                       max_iterations=200, max_radius_diff=5, min_growth_per_iter=5, 
+def adaptive_watershed(image, seed, initial_threshold=150, final_threshold=220, threshold_step=10, 
+                       max_iterations=300, max_radius_diff=5, min_growth_per_iter=5, 
                        max_intensity_jump=20):
     """
     Adaptive region-growing function for INVERTED images:
     - Starts at the darkest point (seed intensity).
     - Expands outward until reaching a threshold.
     - Stops if growth slows down or leaks into other wells.
-    - NEW: Stops if there's a sudden intensity jump relative to the seed intensity.
+    - NEW: Stops if there's a sudden intensity jump in the mean intensity of the region.
 
     Args:
         image: Grayscale (inverted) image.
         seed: A tuple (x, y) for the initial well center.
-        initial_threshold: The max initial seed intensity allowed.
+        initial_threshold: If the seed intensity is above this, it is ignored.
         final_threshold: The max allowed threshold for expansion.
         threshold_step: How much to relax the threshold per iteration.
         max_iterations: Max iterations to prevent infinite growth.
         max_radius_diff: Max allowed change in radius per iteration.
         min_growth_per_iter: Minimum number of pixels added per iteration.
-        max_intensity_jump: Maximum allowed jump in intensity relative to the seed.
+        max_intensity_jump: Maximum allowed jump in mean intensity of the region.
 
     Returns:
         region: Set of pixels in the well.
@@ -366,44 +363,51 @@ def adaptive_watershed(image, seed, initial_threshold=150, final_threshold=190, 
 
     seed_intensity = image[seed[1], seed[0]]  # Get seed pixel intensity
     threshold = seed_intensity  # Start at the darkest pixel
-
+    
     region = set([seed])
     border = set([seed])
     iterations = 0
     prev_radius = 1  # Initial small circle assumption
     
     if seed_intensity > initial_threshold:
-        return set(), 0, 0  # If the seed is too bright, discard it
-
+        return set(), 0, 0
+    
     while iterations < max_iterations and threshold <= final_threshold:
         new_border = set()
-        new_max_intensity = 0  # Track max intensity in new region
-
+        
         for pixel in border:
+            has_unvisited_neighbors = False  # Track if this pixel still has unchecked neighbors
             for neighbor in get_neighbors(pixel, image.shape):
                 if neighbor not in region:
                     pixel_intensity = image[neighbor[1], neighbor[0]]
                     if pixel_intensity <= threshold:  # Grow into brighter areas
+                        has_unvisited_neighbors = True  # It still has unchecked neighbors
                         new_border.add(neighbor)
-                        new_max_intensity = max(new_max_intensity, pixel_intensity)
 
+            if has_unvisited_neighbors:  # If we don't add any neighbor, the pixel is still a border
+                new_border.add(pixel)
+        
         if len(new_border) < min_growth_per_iter:
             threshold += threshold_step
             continue
 
-        # Check for sudden intensity jump relative to the seed intensity
-        if new_max_intensity - seed_intensity > max_intensity_jump & new_max_intensity > seed_intensity:
-            print(f"Stopping: Intensity jumped from seed {seed_intensity} → {new_max_intensity} at iteration {iterations}")
-            return region, iterations, len(region)  # Return detected region and area
+        # Compute mean intensity of the entire region
+        region_intensities = [image[pixel[1], pixel[0]] for pixel in region]
+        mean_region_intensity = sum(region_intensities) / len(region_intensities) if region_intensities else 0
+
+        # Stop if the mean intensity jumps too much from the initial seed intensity
+        if abs(mean_region_intensity - seed_intensity) > max_intensity_jump and mean_region_intensity > seed_intensity:
+            print(f"Stopping: Mean region intensity jumped from {seed_intensity:.2f} → {mean_region_intensity:.2f} at iteration {iterations}")
+            return region, iterations, len(region)
 
         # Compute new radius and check for well leakage
         new_region = region.union(new_border)
         new_area = len(new_region)
         new_radius = math.sqrt(new_area / math.pi)  
-
+        
         if abs(new_radius - prev_radius) > max_radius_diff:
             print(f"Stopping: Radius grew too fast at iteration {iterations} ({prev_radius:.2f} → {new_radius:.2f})")
-            return region, iterations, len(region)  # Return detected region and area
+            return region, iterations, len(region)
 
         # Update values for next iteration
         prev_radius = new_radius
@@ -412,6 +416,78 @@ def adaptive_watershed(image, seed, initial_threshold=150, final_threshold=190, 
         iterations += 1
 
     return region, iterations, len(region)  # Return final region and area
+
+def refine_center_gradient(image, initial_center, search_radius=10, step_size=2, 
+                           max_iters=50, edge_factor=1.5, median_filter=True):
+    """
+    Ajusta el centro del pozo siguiendo el gradiente de intensidad, penalizando bordes bruscos.
+    
+    - Usa normalización local para reducir el efecto de reflejos.
+    - Calcula umbral de bordes basado en la desviación estándar del gradiente.
+    - Suaviza cambios bruscos con un filtro de mediana (opcional).
+
+    Args:
+        image: Imagen en escala de grises (numpy array).
+        initial_center: Tupla (x, y) con la posición inicial del centro.
+        search_radius: Radio de búsqueda alrededor del centro en cada iteración.
+        step_size: Tamaño del paso en cada iteración del gradiente.
+        max_iters: Número máximo de iteraciones.
+        edge_factor: Multiplicador para definir el umbral dinámico de reflejos.
+        median_filter: Si es True, aplica filtro de mediana para estabilizar el centro.
+
+    Returns:
+        (x, y): Tupla con el centro ajustado.
+    """
+    x, y = initial_center
+    h, w = image.shape
+    history = []  # Para aplicar filtro de mediana
+
+    for _ in range(max_iters):
+        # 1. Definir la región de búsqueda asegurando que está dentro de la imagen
+        x_min = max(0, x - search_radius)
+        x_max = min(w, x + search_radius)
+        y_min = max(0, y - search_radius)
+        y_max = min(h, y + search_radius)
+        
+        # 2. Extraer la ROI y normalizarla localmente
+        roi = image[y_min:y_max, x_min:x_max].astype(np.float32)
+        roi = cv2.normalize(roi, None, 0, 255, cv2.NORM_MINMAX)
+        
+        # 3. Calcular gradientes en X e Y
+        grad_x = cv2.Sobel(roi, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(roi, cv2.CV_32F, 0, 1, ksize=3)
+        
+        # 4. Calcular magnitud del gradiente y umbral dinámico
+        grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+        edge_threshold = np.mean(grad_mag) + edge_factor * np.std(grad_mag)
+
+        # 5. Penalizar gradientes muy altos (posibles reflejos)
+        mask = (grad_mag < edge_threshold).astype(np.float32)
+        grad_x *= mask
+        grad_y *= mask
+        
+        # 6. Sumar gradientes para encontrar la dirección dominante
+        sum_grad_x = np.sum(grad_x)
+        sum_grad_y = np.sum(grad_y)
+        
+        # 7. Desplazar el centro en dirección opuesta al gradiente
+        x_new = int(x - step_size * np.sign(sum_grad_x))
+        y_new = int(y - step_size * np.sign(sum_grad_y))
+
+        # 8. Almacenar la posición para aplicar filtro de mediana
+        history.append((x_new, y_new))
+        if len(history) > 3 and median_filter:
+            x_med, y_med = np.median(history[-3:], axis=0).astype(int)
+            x_new, y_new = x_med, y_med
+
+        # 9. Si el cambio es pequeño, detener iteraciones
+        if abs(x_new - x) < 1 and abs(y_new - y) < 1:
+            break
+        
+        x, y = x_new, y_new
+
+    return (x, y)
+
 
 def region_growing(image, seed, pixel_threshold=200, max_iterations=50, max_radius_diff=5):
     """
@@ -533,6 +609,23 @@ def classify_and_filter_wells(well_results):
         filtered_results.append((center, iter_count, updated_area, updated_diameter, avg_whiteness, whiteness_class))
     
     return filtered_results
+
+def save_all_regions(image, all_regions, filename="all_regions.png"):
+    """
+    Saves an image with all detected regions overlaid in white.
+    """
+    region_mask = np.zeros_like(image, dtype=np.uint8)  # Create an empty mask
+
+    for region in all_regions:
+        for x, y in region:
+            region_mask[y, x] = 255  # Mark detected regions in white
+
+    # Convert grayscale to BGR for better visualization
+    overlayed_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    overlayed_image[region_mask == 255] = [0, 255, 0]  # Highlight regions in green
+
+    cv2.imwrite(filename, overlayed_image)  # Save the image
+    print(f"Saved detected regions to {filename}")
 
 
 def preprocess_image(image):
@@ -719,9 +812,31 @@ if __name__ == "__main__":
     #         writer.writerow([x, y, major, minor, eq_radius])
 
     # print("Residue sizes saved to 'residue_sizes.csv'.")
+    # Collect all regions
+    
+    new_centers = []
+    
+    for center in well_centers:
+        new_centers.append(refine_center_gradient(inverted_image, center))
+    
+    debug_image = transformed_image.copy()
+    for center in new_centers:
+        cv2.circle(debug_image, center, 5, (0, 0, 255), -1)
+    cv2.imwrite("debug_refined_well_centers.jpg", debug_image)
+    
+    all_detected_regions = []
+
+    for center in new_centers:
+        region, iter_count, area = adaptive_watershed(inverted_image, center)
+
+        if area > 0:
+            all_detected_regions.append(region)  # Store detected region
+
+    # Save the image with all detected regions
+    save_all_regions(inverted_image, all_detected_regions, "all_regions.png")
     
     well_results = []  # List of tuples: (center, iterations, area, circle_diameter, avg_whiteness)
-    for center in well_centers:
+    for center in new_centers:
         region, iter_count, area = adaptive_watershed(inverted_image, center)
 
         if area > 0:
