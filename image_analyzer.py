@@ -9,6 +9,7 @@ import configparser
 from tkinter import Tk, filedialog
 import csv
 import math
+import pandas as pd
 
 # -----------------------------
 # Global variable for clicked points
@@ -610,6 +611,44 @@ def classify_and_filter_wells(well_results):
     
     return filtered_results
 
+def read_yields_grid():
+    """
+    Reads the yields from an Excel file, allowing the user to select the file and sheet.
+    """
+    Tk().withdraw()  # Hide the main Tkinter window
+    file_path = filedialog.askopenfilename(
+        title="Select an Excel file with the yields",
+        filetypes=[("Excel Files", "*.xlsx *.xls")]
+    )
+
+    if not file_path:
+        print("No file selected.")
+        return None
+
+    print(f"Selected file: {file_path}")
+
+    # Read all sheets
+    df = pd.read_excel(file_path, sheet_name=None, header=None)
+    keys_list = list(df.keys())  # Convertimos dict_keys a lista
+
+    if len(keys_list) > 1:
+        print("Select the page to read:")
+        for i, key in enumerate(keys_list):
+            print(f"{i}: {key}")
+
+        try:
+            page = int(input("Enter the page number: "))  # Pedimos el índice como número
+            if page < 0 or page >= len(keys_list):  # Verificamos si es válido
+                raise ValueError("Invalid page number.")
+        except ValueError:
+            print("Invalid input. Please enter a valid page number.")
+            return None
+        
+        return df[keys_list[page]]
+    else:
+        return df[keys_list[0]]
+
+
 def save_all_regions(image, all_regions, filename="all_regions.png"):
     """
     Saves an image with all detected regions overlaid in white.
@@ -855,8 +894,7 @@ if __name__ == "__main__":
         well_results.append((center, iter_count, area, circle_diameter, avg_whiteness))
         print(f"Center {center}: Iterations = {iter_count}, Area = {area}, "
             f"Circle Diameter = {circle_diameter:.2f}, Avg Whiteness = {avg_whiteness:.2f}")
-        
-        
+
     # for center in well_centers:
     #     region, iter_count, area = region_growing(inverted_image, center, pixel_threshold, max_iterations, max_radius_diff)
     #     if area > 0:
@@ -887,6 +925,9 @@ if __name__ == "__main__":
     size_grid = []
     class_grid = []  # New grid for classifications
 
+    yields_grid = read_yields_grid()
+    
+
     for i in range(num_wells_v):
         row_white = []
         row_size = []
@@ -895,9 +936,15 @@ if __name__ == "__main__":
         for j in range(num_wells_h):
             idx = i * num_wells_h + j
             if idx < len(classified_results):
-                row_white.append(classified_results[idx][4])  # Average whiteness
-                row_size.append(classified_results[idx][3])   # Updated circle diameter (size)
-                row_class.append(classified_results[idx][5])  # Whiteness classification
+                if yields_grid.iloc[i, j] >= 0.75:
+                    row_white.append(classified_results[idx][4])  # Average whiteness
+                    row_size.append(classified_results[idx][3])   # Updated circle diameter (size)
+                    row_class.append(classified_results[idx][5])  # Whiteness classification
+                else:
+                    row_white.append(0)  # Average whiteness
+                    row_size.append(0)   # Updated circle diameter (size)
+                    row_class.append(0)  # Whiteness classification
+                    
             else:
                 # Handle case where there are fewer results than expected
                 row_white.append(0)
@@ -907,6 +954,8 @@ if __name__ == "__main__":
         white_intensity_grid.append(row_white)
         size_grid.append(row_size)
         class_grid.append(row_class)
+        
+
 
     # Save the white intensity grid to CSV
     with open("well_white_intensity.csv", "w", newline="") as f:
