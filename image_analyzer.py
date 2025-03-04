@@ -1,4 +1,6 @@
-from skimage import transform
+from skimage import transform, morphology
+from skimage.util import img_as_ubyte
+
 from skimage.io import imread, imshow
 import cv2
 import numpy as np
@@ -187,7 +189,7 @@ def select_grid_of_wells(image, selected_points, num_wells_h, num_wells_v):
     for center in grid_centers:
         cv2.circle(debug_image, center, 5, (0, 0, 255), -1)
     cv2.imshow("Well Centers", debug_image)
-    cv2.waitKey(0)
+    cv2.waitKey(10000)
     cv2.destroyAllWindows()
     cv2.imwrite("debug_well_centers.jpg", debug_image)
     print("Saved debug image with well centers as 'debug_well_centers.jpg'.")
@@ -335,9 +337,9 @@ def get_neighbors(coord, shape):
 #     return region, iterations, area
 
 
-def adaptive_watershed(image, seed, initial_threshold=150, final_threshold=220, threshold_step=10, 
-                       max_iterations=300, max_radius_diff=5, min_growth_per_iter=5, 
-                       max_intensity_jump=20):
+def adaptive_watershed(image, seed, initial_threshold=110, final_threshold=220, threshold_step=10, 
+                       max_augmentations=6, max_iterations = 400, max_radius_diff=10, min_growth_per_iter=5, 
+                       max_intensity_jump=20, max_border_intensity_jump=20):
     """
     Adaptive region-growing function for INVERTED images:
     - Starts at the darkest point (seed intensity).
@@ -368,29 +370,37 @@ def adaptive_watershed(image, seed, initial_threshold=150, final_threshold=220, 
     region = set([seed])
     border = set([seed])
     iterations = 0
+    augmentations = 0
     prev_radius = 1  # Initial small circle assumption
     
     if seed_intensity > initial_threshold:
         return set(), 0, 0
+
+    augmented_treshold = False
     
-    while iterations < max_iterations and threshold <= final_threshold:
-        new_border = set()
+    while iterations < max_iterations and augmentations < max_augmentations and threshold <= final_threshold:
         
+        new_border = set()
+        old_border = set()      
         for pixel in border:
             has_unvisited_neighbors = False  # Track if this pixel still has unchecked neighbors
             for neighbor in get_neighbors(pixel, image.shape):
                 if neighbor not in region:
                     pixel_intensity = image[neighbor[1], neighbor[0]]
                     if pixel_intensity <= threshold:  # Grow into brighter areas
+                    # if pixel_intensity <= threshold or (neighbor not in region and neighbor not in new_border and pixel_intensity):
                         has_unvisited_neighbors = True  # It still has unchecked neighbors
                         new_border.add(neighbor)
 
-            if has_unvisited_neighbors:  # If we don't add any neighbor, the pixel is still a border
-                new_border.add(pixel)
-        
+            if not has_unvisited_neighbors:  # If we don't add any neighbor, the pixel is still a border
+                old_border.add(pixel)
+
         if len(new_border) < min_growth_per_iter:
             threshold += threshold_step
+            augmented_treshold = True
             continue
+
+        new_border = new_border.union(old_border)  # Add back the old border pixels that have not changed
 
         # Compute mean intensity of the entire region
         region_intensities = [image[pixel[1], pixel[0]] for pixel in region]
@@ -401,15 +411,31 @@ def adaptive_watershed(image, seed, initial_threshold=150, final_threshold=220, 
             print(f"Stopping: Mean region intensity jumped from {seed_intensity:.2f} → {mean_region_intensity:.2f} at iteration {iterations}")
             return region, iterations, len(region)
 
+        # Compute mean intensity of old and new borders
+        old_border_intensities = [image[pixel[1], pixel[0]] for pixel in border]
+        new_border_intensities = [image[pixel[1], pixel[0]] for pixel in new_border]
+        mean_old_border_intensity = sum(old_border_intensities) / len(old_border_intensities) if old_border_intensities else 0
+        mean_new_border_intensity = sum(new_border_intensities) / len(new_border_intensities) if new_border_intensities else 0
+        
+        # Stop if the new border is significantly brighter than the old border
+        if mean_new_border_intensity - mean_old_border_intensity > max_border_intensity_jump and mean_new_border_intensity > mean_old_border_intensity:
+            print(f"Stopping: Border intensity jumped from {mean_old_border_intensity:.2f} → {mean_new_border_intensity:.2f} at iteration {iterations}")
+            return region, iterations, len(region)
+
+
         # Compute new radius and check for well leakage
         new_region = region.union(new_border)
         new_area = len(new_region)
-        new_radius = math.sqrt(new_area / math.pi)  
+        new_radius = math.sqrt(new_area / math.pi)
         
         if abs(new_radius - prev_radius) > max_radius_diff:
             print(f"Stopping: Radius grew too fast at iteration {iterations} ({prev_radius:.2f} → {new_radius:.2f})")
             return region, iterations, len(region)
 
+        if augmented_treshold:
+            augmentations += 1
+        augmented_treshold = False
+        
         # Update values for next iteration
         prev_radius = new_radius
         region = new_region
@@ -418,8 +444,91 @@ def adaptive_watershed(image, seed, initial_threshold=150, final_threshold=220, 
 
     return region, iterations, len(region)  # Return final region and area
 
+def multi_angle_tophat_remove_glare(
+    image_bgr,
+    kernel_size=(100, 50),
+    angles=[0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180],
+    threshold_value=50,
+    inpaint_radius=3,
+    dilate_iterations=1,
+    method="inpaint"  # Choose "inpaint" or "subtract"
+):
+    """
+    Multi-angle elliptical Top-Hat + threshold + (inpaint or subtract).
+
+    Args:
+        image_bgr (np.ndarray): Original BGR color image.
+        kernel_size (tuple of int): (height, width) in pixels for the elliptical kernel.
+        angles (list of floats): Rotation angles in degrees.
+        threshold_value (int): Threshold for deciding which top-hat intensity is glare.
+        inpaint_radius (int): Radius for the inpaint operation (if using inpaint).
+        dilate_iterations (int): How many times to dilate the final mask (0 = no dilation).
+        method (str): "inpaint" for inpainting, "subtract" for subtraction.
+
+    Returns:
+        processed_image (np.ndarray): The image with glare removed.
+        combined_mask (np.ndarray): The combined mask of detected glare areas (for debugging).
+    """
+    # Convert to grayscale
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Initialize a combined mask (same size as gray)
+    combined_mask = np.zeros_like(gray, dtype=np.uint8)
+
+    # Apply multi-angle Top-Hat
+    for angle in angles:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, kernel_size)
+
+        # Rotate Kernel
+        height, width = kernel.shape
+        center = (width // 2, height // 2)
+        rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        cos_val = abs(rotation_matrix[0, 0])
+        sin_val = abs(rotation_matrix[0, 1])
+        new_width = int((height * sin_val) + (width * cos_val))
+        new_height = int((height * cos_val) + (width * sin_val))
+
+        rotation_matrix[0, 2] += (new_width / 2) - center[0]
+        rotation_matrix[1, 2] += (new_height / 2) - center[1]
+
+        rotated_kernel = cv2.warpAffine(kernel, rotation_matrix, (new_width, new_height))
+        rotated_kernel = (rotated_kernel > 0).astype(np.uint8)
+
+        # Apply Top-Hat
+        tophat_result = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, rotated_kernel)
+
+        # Threshold to build glare mask
+        _, partial_mask = cv2.threshold(tophat_result, threshold_value, 255, cv2.THRESH_BINARY)
+
+        # Combine (OR) partial masks
+        combined_mask = cv2.bitwise_or(combined_mask, partial_mask)
+
+    # Optional: Dilate mask
+    if dilate_iterations > 0:
+        se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))  
+        combined_mask = cv2.dilate(combined_mask, se, iterations=dilate_iterations)
+
+    # Choose method: Inpainting or Subtraction
+    if method == "inpaint":
+        print("Using inpainting for glare removal...")
+        processed_image = cv2.inpaint(image_bgr, combined_mask, inpaint_radius, cv2.INPAINT_TELEA)
+    elif method == "subtract":
+        print("Using subtraction for glare removal...")
+        processed_image = cv2.subtract(image_bgr, cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR))
+    else:
+        raise ValueError("Invalid method. Choose 'inpaint' or 'subtract'.")
+
+    # Save debug images for comparison
+    cv2.imwrite("debug_tophat.jpg", tophat_result)
+    cv2.imwrite("debug_combined_mask.jpg", combined_mask)
+    cv2.imwrite(f"debug_{method}.jpg", processed_image)
+
+    return processed_image, combined_mask
+
+
 def refine_center_gradient(image, initial_center, search_radius=10, step_size=2, 
-                           max_iters=50, edge_factor=1.5, median_filter=True):
+                           max_iters=150, edge_factor=1.5, median_filter=True):
     """
     Ajusta el centro del pozo siguiendo el gradiente de intensidad, penalizando bordes bruscos.
     
@@ -739,6 +848,9 @@ if __name__ == "__main__":
     # Inpaint the image
     image_inpainted = cv2.inpaint(image, mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
     
+    # image_inpainted, mask_comb = multi_angle_tophat_remove_glare(image, method="inpaint")
+    # image_inpainted, mask_comb = multi_angle_tophat_remove_glare(image, method="subtract")
+    
     # Step 1: Select 4 points for perspective transformation
     print("Select 4 points for perspective transformation.")
     points_4 = select_n_points(
@@ -854,9 +966,16 @@ if __name__ == "__main__":
     # Collect all regions
     
     new_centers = []
+    # image_inpainted, mask_comb = multi_angle_tophat_remove_glare(image, method="inpaint")
+    image_for_refining, mask_comb = multi_angle_tophat_remove_glare(transformed_image, method="subtract", threshold_value=130)
+    # Convert the transformed image to grayscale and invert it
+    gray_ref = cv2.cvtColor(image_for_refining, cv2.COLOR_BGR2GRAY)
+    inverted_ref = cv2.bitwise_not(gray_ref)
+    cv2.imwrite("debug_inverted_image_refined.jpg", inverted_ref)
+  
     
     for center in well_centers:
-        new_centers.append(refine_center_gradient(inverted_image, center))
+        new_centers.append(refine_center_gradient(inverted_ref, center))
     
     debug_image = transformed_image.copy()
     for center in new_centers:
@@ -955,8 +1074,7 @@ if __name__ == "__main__":
         size_grid.append(row_size)
         class_grid.append(row_class)
         
-
-
+        
     # Save the white intensity grid to CSV
     with open("well_white_intensity.csv", "w", newline="") as f:
         writer = csv.writer(f)
